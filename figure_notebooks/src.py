@@ -5,8 +5,13 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from biomart import BiomartServer
-from scipy.stats import false_discovery_control, pearsonr, ttest_ind
+from scipy.stats import false_discovery_control, pearsonr, ttest_ind, gaussian_kde
 import warnings
+import logging
+import matplotlib.patheffects as pe
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score
+from matplotlib.patches import Patch
 
 class Utils():
     def __init__(self):
@@ -316,6 +321,76 @@ class Utils():
         return [
             Utils.parse_label(label, lookup_dict, general_regex) for label in labels
         ]
+    
+    @staticmethod
+    def gaussian_density(
+        x: np.array,
+        y: np.array,
+    ):
+        # create correct shape for gaussian density
+        xz = np.vstack([x, y])
+        # estimate density
+        pdf = gaussian_kde(xz)
+        # get density values
+        z = pdf(xz)
+
+        return z
+    
+    @staticmethod
+    def regression(
+        x: np.array,
+        y: np.array,
+        return_x: bool = False,
+        custom_range: tuple = None,
+    ):
+        """Perform a linear regression and return a linspace of the regression
+
+        Parameters
+        ----------
+        x : np.array
+            x values
+        y : np.array
+            y values
+        return_y_pred : bool
+            return y_pred values or x linspace for plotting
+
+        Returns
+        -------
+        tuple
+            x, y_pred, r2, a, b
+
+
+        """
+
+        # remove na values
+        x_nan_mask = ~np.isnan(x)
+        y_nan_mask = ~np.isnan(y)
+        nan_mask = np.logical_and(x_nan_mask, y_nan_mask)
+        x = x[nan_mask]
+        y = y[nan_mask]
+
+        x = x.reshape(-1, 1)
+        y = y.reshape(-1, 1)
+        reg = LinearRegression().fit(x, y)
+
+        # get r2 score
+        r2 = r2_score(y, reg.predict(x))
+
+        # get coefficients
+        a = reg.coef_[0][0]
+        b = reg.intercept_[0]
+
+        # return actual values or linspace for line plotting
+        if return_x:
+            y_pred = reg.predict(x)
+            return x, y_pred, r2, a, b
+        else:
+            if custom_range is not None:
+                x = np.linspace(custom_range[0], custom_range[1], 100).reshape(-1, 1)
+            else:
+                x = np.linspace(x.min(), x.max(), 100).reshape(-1, 1)
+            y_pred = reg.predict(x)
+            return x, y_pred, r2, a, b
 
     @staticmethod
     def boxplot(
@@ -662,6 +737,424 @@ class Utils():
             return f, axs, facet_ttests
         else:
             return f, axs
+
+    @staticmethod 
+    def scatter(
+            data: pd.DataFrame,
+            x_col: str,
+            y_col: str,
+            metadata: pd.DataFrame = None,
+            color_column: str = None,
+            base_color: str = None,
+            single_color: bool = False,
+            outline_color: str = None,
+            title: str = "",
+            xlabel: str = "",
+            ylabel: str = "",
+            figsize_x: int = 2,
+            figsize_y: int = 2,
+            xlim: tuple = None,
+            ylim: tuple = None,
+            linear_regression: bool = False,
+            regression_linecolor: str = "red",
+            show_equation: bool = False,
+            linreg_range: tuple = None,
+            vline: float = None,
+            hline: float = None,
+            dline: float = None,
+            add_lineplot: bool = False,
+            lineplot_kwargs: dict = None,
+            highlight_points: list = None,
+            highlight_lookup_column: str = "index",
+            highlight_labels_column: str = "index",
+            highlight_color: str = "red",
+            collate_label_and_lookup: bool = False,
+            label_va: str = "random",
+            label_ha: str = "random",
+            hide_labels: bool = False,
+            density: bool = False,
+            segments: str = "color",  # 'facets' or 'color'
+            facet_titles: bool = False,
+            x_tick_multiple: int = None,
+            y_tick_multiple: int = None,
+            aspect_equal: bool = False,
+            legend: bool = False,
+            scatter_kwargs=None,
+            legend_kwargs=None,
+            label_general_regex=None,
+            label_lookup_dict=None,
+            enumerate_plot: str = None,
+            enumeration_xy: tuple = (-0.5, 1.25),
+            return_linear_regression: bool = False,
+            show: bool = True,
+            linewidth_large = 1,
+            linewidth_medium = 0.5,
+            linewidth_small = 0.5,
+            fontsize_medium: int = 8,
+        ):
+            """Scatterplot functionality based on dataframe input"""
+
+            highlight_points = [] if highlight_points is None else highlight_points
+            scatter_kwargs = {"s": 5} if scatter_kwargs is None else scatter_kwargs
+            legend_kwargs = {} if legend_kwargs is None else legend_kwargs
+
+            # combine data and metadata for easier plotting
+            if metadata is not None:
+                if not all(data.index == metadata.index):
+                    raise ValueError("Data and metadata indices do not match")
+                data = pd.concat([data, metadata], axis=1)
+            else:
+                data = data.copy()
+
+            # prepare basic data arrays: no missing values allowed
+            data = data.dropna(subset=[x_col, y_col])
+
+            x = data[x_col].values.astype(float)
+            y = data[y_col].values.astype(float)
+            c = (
+                data[color_column].values
+                if color_column is not None
+                else np.array(["datapoint"] * len(x))
+            )
+
+            # set base color
+            base_color = base_color if base_color is not None else "lightgrey"
+
+            # create colorscale
+            if single_color:
+                colorscale_names = ["datapoint"]
+                color_map_dict = {"datapoint": base_color}
+            else:
+                colorscale_names = pd.Series(c).unique()
+                color_map_dict = {cn : base_color for cn in colorscale_names}
+
+            # determine number of windows
+            if segments == "facets":
+                windows = len(colorscale_names)
+            elif segments == "color":
+                windows = 1
+
+            # scatterplot: subplot for each color
+            f, axs = plt.subplots(
+                1, windows, figsize=(figsize_x, figsize_y), sharey=True, sharex=True
+            )
+
+            # lineplot if specified: all points regardless of color have to be connected
+            if add_lineplot:
+                if lineplot_kwargs is None:
+                    lineplot_kwargs = {}
+                if "lw" not in lineplot_kwargs:
+                    lineplot_kwargs["lw"] = linewidth_medium
+                if "color" not in lineplot_kwargs:
+                    lineplot_kwargs["color"] = "black"
+                axs.plot(
+                    x,
+                    y,
+                    **lineplot_kwargs,
+                )
+
+            # iterate over colorscale names
+            legend_patches = []
+            r2_scores = {}
+            coefficients = {}
+            for i, n in enumerate(color_map_dict.keys()):
+                ax = axs if windows == 1 else axs[i]
+                idx = c == n
+
+                # set linewidths
+                for spine in ax.spines.values():
+                    spine.set_linewidth(linewidth_medium)
+
+
+                # add gaussian density
+                if density:
+                    point_color = Utils.gaussian_density(x=x[idx], y=y[idx])
+                else:
+                    point_color = np.array(
+                        [color_map_dict.get(n, base_color)] * len(x[idx])
+                    )
+
+                # scatterplot
+                ax.scatter(
+                    x[idx], y[idx], c=point_color, **scatter_kwargs, marker=".", lw=0
+                )
+
+                # set tick multiples, e.g. to obtain labels 5, 10, 15, 20, 25, 30 instead of 10, 20, 30
+                if x_tick_multiple is not None:
+                    ax.set_xticks(
+                        np.arange(
+                            np.floor(x.min() / x_tick_multiple) * x_tick_multiple,
+                            np.ceil(x.max() / x_tick_multiple) * x_tick_multiple,
+                            x_tick_multiple,
+                        )
+                    )
+                if y_tick_multiple is not None:
+                    ax.set_yticks(
+                        np.arange(
+                            np.floor(y.min() / y_tick_multiple) * y_tick_multiple,
+                            np.ceil(y.max() / y_tick_multiple) * y_tick_multiple,
+                            y_tick_multiple,
+                        )
+                    )
+
+                # highlight points
+                if len(highlight_points) > 0:
+                    lookup_col = (
+                        data.index
+                        if highlight_lookup_column == "index"
+                        else data[highlight_lookup_column]
+                    )
+                    labels_col = (
+                        data.index
+                        if highlight_labels_column == "index"
+                        else data[highlight_labels_column]
+                    )
+
+                    if any(lookup_col.duplicated()):
+                        logging.warning(
+                            f"Point labelling lookup column {highlight_lookup_column} contains duplicates. Taking first occurence."
+                        )
+
+                    for point in highlight_points:
+                        if point not in lookup_col.values:
+                            logging.warning(
+                                f"Point {point} not found in lookup column {highlight_lookup_column}. Skipping."
+                            )
+                            continue
+
+                        if collate_label_and_lookup:
+                            collated_label = (
+                                f"{labels_col.values[lookup_col == point][0]} : {point}"
+                            )
+                        else:
+                            collated_label = labels_col.values[lookup_col == point][0]
+
+                        point_dict = {
+                            "x": x[lookup_col == point][0],
+                            "y": y[lookup_col == point][0],
+                            "label": collated_label,
+                        }
+                        ax.scatter(
+                            point_dict["x"],
+                            point_dict["y"],
+                            color=highlight_color,
+                            s=15,
+                            edgecolor="black",
+                            lw=1,
+                        )
+
+                        # randomly draw from left, right, top, bottom
+                        if label_va == "random":
+                            va = np.random.choice(["top", "bottom"])
+                        else:
+                            va = label_va
+
+                        if label_ha == "random":
+                            ha = np.random.choice(["left", "right"])
+                        else:
+                            ha = label_ha
+
+                        if not hide_labels:
+                            _parsed_labels = Utils.parse_label(
+                                point_dict["label"], label_lookup_dict, label_general_regex
+                            )
+                            ax.text(
+                                point_dict["x"],
+                                point_dict["y"],
+                                _parsed_labels,
+                                color="white",
+                                fontsize=fontsize_medium,
+                                ha=ha,
+                                va=va,
+                                path_effects=[
+                                    pe.withStroke(linewidth=3, foreground="black")
+                                ],
+                            )
+
+                # regression line
+                if segments == "facets":
+                    if linear_regression:
+                        lr_x, lr_y, r2, a, b = Utils.regression(
+                            x=x[idx], y=y[idx], custom_range=linreg_range
+                        )
+                        ax.plot(
+                            lr_x,
+                            lr_y,
+                            color=regression_linecolor,
+                            lw=linewidth_large,
+                            ls="--",
+                        )
+                        if show_equation:
+                            ax.text(
+                                0.05,
+                                0.85,
+                                f"y = {a:.2f}x + {b:.2f}\nR2 = {r2:.2f}",
+                                transform=ax.transAxes,
+                                fontsize=fontsize_medium,
+                                color="grey",
+                            )
+
+                elif segments == "color" and linear_regression:
+                    lr_x, lr_y, r2, a, b = Utils.regression(
+                        x=x, y=y, custom_range=linreg_range
+                    )
+                    ax.plot(
+                        lr_x,
+                        lr_y,
+                        color=regression_linecolor,
+                        lw=linewidth_large,
+                        ls="--",
+                    )
+                    if show_equation:
+                        ax.text(
+                            0.05,
+                            0.85,
+                            f"y = {a:.2f}x + {b:.2f}\nR2 = {r2:.2f}",
+                            transform=ax.transAxes,
+                            fontsize=fontsize_medium,
+                        )
+
+                # add r2 scores and coefficient to dictionary
+                r2_scores[n] = r2 if linear_regression else None
+                coefficients[n] = a if linear_regression else None
+
+                # other lines
+                if vline is not None:
+                    ax.axvline(vline, color="black", lw=linewidth_large, ls="--")
+
+                if hline is not None:
+                    ax.axhline(hline, color="black", lw=linewidth_large, ls="--")
+
+                # add to legend patches
+                _legend_patchname_parsed = Utils.parse_label(
+                    n, label_lookup_dict, label_general_regex
+                )
+                legend_patches.append(
+                    Patch(
+                        facecolor=color_map_dict.get(n, base_color),
+                        label=_legend_patchname_parsed,
+                        edgecolor=outline_color,
+                        linewidth=linewidth_medium,
+                    )
+                )
+
+                # decoration
+                ax.spines["top"].set_visible(False)
+                ax.spines["right"].set_visible(False)
+
+                # set aspect ratio
+                if aspect_equal:
+                    ax.set_aspect("equal")
+
+                # set axis labels for every subplot
+                if xlabel is None:
+                    _xcol_parsed = Utils.parse_label(
+                        x_col, label_lookup_dict, label_general_regex
+                    )
+                    ax.set_xlabel(_xcol_parsed, fontsize=fontsize_medium)
+                else:
+                    _xlabel_parsed = Utils.parse_label(
+                        xlabel, label_lookup_dict, label_general_regex
+                    )
+                    ax.set_xlabel(_xlabel_parsed, fontsize=fontsize_medium)
+
+                if i == 0:
+                    if ylabel is None:
+                        _ycol_parsed = Utils.parse_label(
+                            y_col, label_lookup_dict, label_general_regex
+                        )
+                        ax.set_ylabel(_ycol_parsed, fontsize=fontsize_medium)
+                    else:
+                        _ylabel_parsed = Utils.parse_label(
+                            ylabel, label_lookup_dict, label_general_regex
+                        )
+                        ax.set_ylabel(_ylabel_parsed, fontsize=fontsize_medium)
+
+                # for facets, set labels if needed
+                if segments == "facets" and facet_titles:
+                    _facet_title_parsed = Utils.parse_label(
+                        n, label_lookup_dict, label_general_regex
+                    )
+                    ax.set_title(_facet_title_parsed, fontsize=fontsize_medium)
+
+                # set x tick size
+                ax.tick_params(axis="x", labelsize=fontsize_medium)
+                ax.tick_params(axis="y", labelsize=fontsize_medium)
+
+                # set figure enumeration if needed
+                if enumerate_plot is not None and i == 0:
+                    _parsed_enumeration = Utils.parse_label(
+                        enumerate_plot, label_lookup_dict, label_general_regex
+                    )
+                    ax.text(
+                        enumeration_xy[0],
+                        enumeration_xy[1],
+                        _parsed_enumeration,
+                        horizontalalignment="left",
+                        verticalalignment="center",
+                        transform=ax.transAxes,
+                        fontsize=fontsize_medium,
+                        color="black",
+                        fontweight="bold",
+                    )
+
+                # set suptitle
+                if segments == "facets":
+                    if title is not None:
+                        _suptitle_parsed = Utils.parse_label(
+                            title, label_lookup_dict, label_general_regex
+                        )
+                        plt.suptitle(_suptitle_parsed, fontsize=fontsize_medium)
+                elif segments == "color":
+                    if title is None:
+                        _plot_title = f'{y_col} : {"|".join(colorscale_names)}'
+                        _plot_title_parsed = Utils.parse_label(
+                            _plot_title, label_lookup_dict, label_general_regex
+                        )
+                        ax.set_title(_plot_title_parsed, fontsize=fontsize_medium)
+                    else:
+                        _plot_title_parsed = Utils.parse_label(
+                            title, label_lookup_dict, label_general_regex
+                        )
+                        ax.set_title(_plot_title_parsed, fontsize=fontsize_medium)
+
+            if legend:
+                _legend_title_parsed = Utils.parse_label(
+                    color_column, label_lookup_dict, label_general_regex
+                )
+                ax.legend(
+                    handles=legend_patches,
+                    frameon=False,
+                    title=_legend_title_parsed,
+                    prop={"size": fontsize_medium},
+                    title_fontsize=fontsize_medium,
+                    **legend_kwargs,
+                )
+
+            if xlim is not None:
+                ax.set_xlim(xlim)
+            if ylim is not None:
+                ax.set_ylim(ylim)
+
+            # add diagonal line
+            if dline is not None:
+                min_left = min(ax.get_xlim()[0], ax.get_ylim()[0])
+                max_right = max(ax.get_xlim()[1], ax.get_ylim()[1])
+                ax.plot(
+                    [min_left, max_right],
+                    [min_left, max_right],
+                    color="black",
+                    lw=linewidth_small,
+                    ls="--",
+                )
+
+            if show:
+                plt.show()
+
+            if return_linear_regression:
+                return f, axs, (r2_scores, coefficients)
+            else:
+                return f, axs
         
     @staticmethod
     def save_figure(
