@@ -589,6 +589,105 @@ class Utils():
             patches.pop(0)
             title = titles.pop(0)
             return patches, titles, title
+        
+    @staticmethod
+    def nan_safe_bh_correction(
+        pvals: np.array,
+    ):
+        """Scipy.stats.false_discovery_control with nan-safe handling
+
+        Scipy.stats.false_discovery_control is not nan-safe, we need to delete nans, apply correction, then re-insert nans.
+        This method adds a unique index to the input array, drops nans, applies correction, then merges the outcome back to
+        the original array indices.
+
+        Parameters:
+            pvals (np.array): Array of p-values.
+        """
+
+        # convert array to dataframe with distinct index
+        pval_df = pd.DataFrame({"pvals": pvals})
+
+        initial_index = range(len(pval_df))
+        pval_df.index = initial_index
+
+        pval_df_no_nans = pval_df.copy().dropna()
+        pval_df_no_nans["pvals_corrected"] = false_discovery_control(
+            pval_df_no_nans["pvals"], method="bh"
+        )
+
+        # merge back to original index
+        pval_df = pval_df.join(pval_df_no_nans["pvals_corrected"], how="left")
+
+        # verify that the original index is preserved
+        if not all(pval_df.index == initial_index):
+            raise ValueError("Index mismatch in nan_safe_bh_correction.")
+
+        return pval_df["pvals_corrected"].values
+
+    @staticmethod
+    def pairwise_correlation(
+        data_a: pd.DataFrame,
+        data_b: pd.DataFrame,
+    ):
+        """Pairwise pearson correlation between two datasets
+
+        Calculate pairwise pearson correlation with p-values between
+        matching columns of two datasets. This method is useful for
+        assessing the correlation between two datasets.
+
+        Parameters
+        ----------
+        data_a : pd.DataFrame
+            Dataframe with features as columns and samples as rows.
+
+        data_b : pd.DataFrame
+            Dataframe with features as columns and samples as rows.
+
+        Returns
+        -------
+        pd.DataFrame
+            p x 2 dataframe with pairwise pearson correlations between data_a and data_b and p-values,
+            where p is the number of shared column names between data_a and data_b.
+
+        """
+
+        # align datasets on sample dimension if necessary
+        if data_a.shape[0] != data_b.shape[0]:
+            raise ValueError("Dataframes have different number of samples, aligning...")
+
+        # data must be aligned on samples to perform correlation analysis
+        data_a, data_b = data_a.align(data_b, join="inner", axis=0)
+
+        a = data_a.values
+        b = data_b.values
+
+        # calculate correlation by iteration, since the time-complexity is only O(p)
+        output_df = pd.DataFrame(
+            index=data_a.columns,
+            columns=["r", "p"],
+        )
+
+        for i, col in enumerate(output_df.index):
+            # get aligned columns
+            x = a[:, i]
+            y = b[:, i]
+
+            # remove missing values. Note that x and y are aligned
+            na_mask = np.isnan(x) | np.isnan(y)
+            x = x[~na_mask]
+            y = y[~na_mask]
+
+            r, p = pearsonr(x, y)
+            output_df.loc[col, "r"] = r
+            output_df.loc[col, "p"] = p
+
+        # convert values to float
+        output_df = output_df.astype(float)
+
+        # add benjamini-hochberg corrected p-values
+        output_df["p_adj"] = Utils.nan_safe_bh_correction(output_df["p"].values)
+
+        return output_df
 
     @staticmethod
     def boxplot(
