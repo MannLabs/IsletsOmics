@@ -12,6 +12,7 @@ import matplotlib.patheffects as pe
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 from matplotlib.patches import Patch
+from itertools import cycle
 
 class Utils():
     def __init__(self):
@@ -478,8 +479,13 @@ class Utils():
         if grouping_levels is not None:
             data = data[data[grouping_col].isin(grouping_levels)]
 
-        # selected colors
-        data["_color"] = single_color if single_color else base_color
+        if single_color is None:
+            unique_colors = data[color_col].unique()
+            preset_colors = ['#cb334d', '#54aead', '#3a7eb8']
+            color_map_dict = {key : col for key, col in zip(unique_colors, cycle(preset_colors))}
+            data["_color"] = data[color_col].apply(lambda x: color_map_dict.get(x, base_color))
+        else:
+            data["_color"] = base_color
 
         # add '_index' column if label and or lookup column are '_index'
         if highlight_labels_column == "_index" or highlight_lookup_column == "_index":
