@@ -172,3 +172,9 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Misc
+revision_questions/
+revision_results/
+figure_notebooks/.DS_Store
+.DS_Store
