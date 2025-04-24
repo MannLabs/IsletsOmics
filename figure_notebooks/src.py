@@ -6,13 +6,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 from biomart import BiomartServer
 from scipy.stats import false_discovery_control, pearsonr, ttest_ind, gaussian_kde
+from scipy.cluster.hierarchy import linkage, dendrogram
 import warnings
 import logging
 import matplotlib.patheffects as pe
 from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import RobustScaler, StandardScaler
 from sklearn.metrics import r2_score
-from matplotlib.patches import Patch
+from matplotlib.patches import Patch, Rectangle
 from itertools import cycle
+from typing import Union, Tuple
+import anndata as ad
+import seaborn as sns
 
 class Utils():
     def __init__(self):
@@ -392,6 +397,198 @@ class Utils():
                 x = np.linspace(x.min(), x.max(), 100).reshape(-1, 1)
             y_pred = reg.predict(x)
             return x, y_pred, r2, a, b
+        
+    @staticmethod
+    def impute_gaussian(
+        X: pd.DataFrame,
+        std_offset: float = 3,
+        std_factor: float = 0.3,
+        random_state: int = 42,
+    ):
+        """Impute missing values in each column by sampling from
+        a gaussian distribution. The distribution is centered at
+        std_offset standard deviations below the mean of the feature
+        and has a standard deviation of std_factor times the feature's.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Dataframe with features as columns and samples as rows.
+        std_offset : float
+            Number of standard deviations below the mean to center the
+            gaussian distribution.
+        std_factor : float
+            Factor to multiply the feature's standard deviation with to
+            get the standard deviation of the gaussian distribution.
+
+        Returns
+        -------
+        pd.DataFrame
+            Dataframe with missing values imputed.
+
+        """
+
+        if not isinstance(X, pd.DataFrame):
+            raise ValueError("Input must be a pandas DataFrame.")
+
+        # All columns must be either int or float
+        if not all([X[col].dtype in [int, float] for col in X.columns]):
+            raise ValueError("All columns must be either int or float.")
+
+        # set random seed
+        np.random.seed(random_state)
+
+        # always copy for now, implement inplace later if needed
+        idxs = X.index
+        cols = X.columns
+        X = X.values.copy()
+
+        # check for missing values
+        na_col_idxs = np.where(np.isnan(X).sum(axis=0) > 0)[0]
+
+        # generate corresponding downshifted features
+        stds = np.nanstd(X, axis=0)
+        means = np.nanmean(X, axis=0)
+        shifted_means = means - std_offset * stds
+        shifted_stds = stds * std_factor
+
+        # iterate over na-containing columns and impute from corresponding gaussian
+        for i in na_col_idxs:
+            na_idx = np.where(np.isnan(X[:, i]))[0]
+            X[na_idx, i] = np.random.normal(
+                shifted_means[i], shifted_stds[i], len(na_idx)
+            )
+
+        return pd.DataFrame(X, index=idxs, columns=cols)
+    
+    @staticmethod
+    def scale_and_center(  # explicitly unit tested in test_scale_and_center()
+        X: Union[pd.DataFrame, np.ndarray],
+        center: bool = True,
+        scale: bool = True,
+        scaler: str = "standard",  # standard or robust
+    ) -> Union[pd.DataFrame, np.ndarray]:
+        """Scale and/or center data.
+
+        Either use standard or outlier-robust scaler. robust scaler
+        relies on interquartile range and is more resistant to
+        outliers. Scaling operates on COLUMNS, i.e. features.
+
+        Parameters
+        ----------
+        X : pd.DataFrame or np.ndarray
+            Input data
+        center : bool
+            Whether to center features (mean for standard, median for
+            robust scaler).
+        scale : bool
+            Whether to scale features to constant std (standard scaler)
+            or IQR (robust scaler)
+        scaler : str
+            Sklearn scaler to use. Available scalers are 'standard' or
+            'robust'.
+
+        Returns
+        -------
+        pd.DataFrame or np.ndarray
+            Data with optionally centered / scaled features
+
+        """
+
+        logging.info(
+            f"|-> Scaling and centering data: applying Scikit-Learn {scaler} Scaler ..."
+        )
+
+        if not isinstance(X, (pd.DataFrame, np.ndarray)):
+            raise ValueError("Input data must be pd.DataFrame or np.ndarray")
+
+        # always copy for now, implement inplace later if needed
+        X = X.copy()
+
+        # RobustScaler is used to scale and center data, as it is less sensitive to outliers
+        if scaler == "standard":
+            scaler = StandardScaler(with_mean=center, with_std=scale)
+        elif scaler == "robust":
+            scaler = RobustScaler(
+                with_centering=center, with_scaling=scale, quantile_range=(25.0, 75.0)
+            )
+        else:
+            raise ValueError(
+                "Unsupported scaler, must be either 'standard' or 'robust'."
+            )
+
+        if isinstance(X, pd.DataFrame):
+            return pd.DataFrame(
+                scaler.fit_transform(X), index=X.index, columns=X.columns
+            )
+        elif isinstance(X, np.ndarray):
+            return scaler.fit_transform(X)
+        
+    @staticmethod
+    def multilegend_patch_generator(
+        color_dict: dict,
+        pad_max_length: bool = False,
+        linewidth: float = 0.5,
+        single_column: bool = True,
+    ) -> tuple:
+        """Make a patch list and a title list from a color-dictionary.
+
+        The point of this function is to take a color reference dictionary
+        and generate a list of patches along with a list of titles to be used
+        in a single legend call.
+
+        Parameters:
+            color_dict (dict) : Dictionary of dictionaries where each top
+            level key is a variable and the second level keys are its unique
+            values and the values are corresponding colors to be shown in the
+            legend.
+            pad_max_length (bool) : This parameter is used when the legend is
+            to be shown in multiple columns, to avoid breaking headings into
+            separate columns.
+            linewidth (float) : Width of the line around the patches.
+            single_column (bool) : Whether to show the legend in a single column,
+            which means that sublegend titles have to be added in the texts with
+            invisible patches. If this is set to False, a title will be returned
+            along with patches and legend labels.
+
+        Returns:
+            tuple : A tuple containing a list of matplotlib patches and a list
+            of titles for these patches. Whenever a new variable is encountered,
+            the corresponding patch is empty and the title is the variable name.
+
+        Example:
+            Input : {"var1" : {"high" : "red", "low" : "blue"}, "var2" : {"high" : "green", "low" : "yellow"}}
+            returns : ([Rectangle((0,0), 0, 0, color='w'), Patch(facecolor = 'red'), Patch(facecolor = 'blue'),
+                        Rectangle((0,0), 0, 0, color='w'), Patch(facecolor = 'green'), Patch(facecolor = 'yellow'],
+                        ['var1', 'high', 'low',
+                            'var2', 'high', 'low'])
+
+        """
+
+        longest_column = max([len(color_dict[k]) for k in color_dict])
+
+        patches = []
+        titles = []
+
+        for var, values in color_dict.items():
+            titles.append(var + ":")
+            patches.append(Patch(color="w"))
+            for v, c in values.items():
+                titles.append(v)
+                patches.append(Patch(facecolor=c, edgecolor="black", lw=linewidth))
+
+            if pad_max_length:
+                while len(titles) < longest_column + 1:
+                    titles.append("")
+                    patches.append(Rectangle((0, 0), 0, 0, color="w"))
+
+        if single_column:
+            return patches, titles
+        else:
+            # remove first patch and title
+            patches.pop(0)
+            title = titles.pop(0)
+            return patches, titles, title
 
     @staticmethod
     def boxplot(
@@ -1161,6 +1358,441 @@ class Utils():
                 return f, axs, (r2_scores, coefficients)
             else:
                 return f, axs
+
+    @staticmethod    
+    def annotated_heatmap(
+        data: pd.DataFrame,
+        sample_metadata: pd.DataFrame = None,
+        feature_metadata: pd.DataFrame = None,
+        colorbars_x: list = None,
+        colorbars_y: list = None,
+        cluster_across_y: bool = False,
+        show_dendrogram_y: bool = False,
+        cluster_across_x: bool = False,
+        show_dendrogram_x: bool = False,
+        cmap: str = "diverging",
+        annotated_rows: bool = True,
+        annotated_cols: bool = True,
+        show_xlabels: bool = True,
+        show_ylabels: bool = True,
+        title: str = None,
+        label_parse_dict: dict = None,
+        label_parse_regex: str = None,
+        legends_position: str = "right",
+        legend_right_offset: float = 0.25,
+        legend_right_lineheight: float = 0.02,
+        legend_right_headspace: float = 0,
+        enumerate_plot: str = None,
+        enumerate_xy: tuple = (-0.35, 1.15),
+        vmin: float = -1,
+        vmax: float = 1,
+        fontsize_medium: int = 8,
+        linewidth_medium: float = 0.5,
+    ):
+        """Wrapper for scanpy's heatmap function
+
+        Simplified input syntax to sns heatmap functionality
+
+        Parameters:
+
+        Returns:
+
+        Example:
+
+        """
+
+        # create AnnData object
+        adata = ad.AnnData(X=data)
+
+        if sample_metadata is not None:
+            adata.obs = sample_metadata
+
+        if feature_metadata is not None:
+            adata.var = feature_metadata
+
+        # compute linkage for horizontal dendrogram
+        x_linkage = None
+        if cluster_across_x:
+            x_linkage = linkage(adata.X.T, method="ward")
+            # scale for equal sized steps
+            n_samples = adata.X.shape[1]
+            x_linkage[:, 2] = np.arange(1, n_samples) / (n_samples - 1)
+
+        # compute linkage for vertical dendrogram
+        y_linkage = None
+        if cluster_across_y:
+            y_linkage = linkage(adata.X, method="ward")
+            # scale for equal sized steps
+            n_samples = adata.X.shape[0]
+            # y_linkage[:, 2] = np.linspace(0, 1, len(y_linkage))
+
+        # specify palette based on shuffled spectral palette
+        _pal = sns.color_palette("Spectral", 11).as_hex()
+        color_palette = [_pal[i] for i in [0, 9, 10, 3, 5, 1, 8, 2, 7]]
+        
+        # map colors to colorbars
+        color_x_frame = None
+        if colorbars_x is not None:
+            unique_values = adata.var[colorbars_x].apply(pd.unique)
+            sorted_unique_values = sorted(pd.Series(np.concatenate(unique_values.values)).fillna('NA').unique().tolist())
+            color_dict = {key: col for key, col in zip(sorted_unique_values, cycle(color_palette))}
+            colorbars_x_reference_dict = {
+                x: {y: color_dict[y] for y in unique_values[x]} for x in colorbars_x
+            }
+            color_x_frame = pd.DataFrame(
+                {
+                    x: adata.var[x].map(colorbars_x_reference_dict[x])
+                    for x in colorbars_x
+                }
+            )
+        else:
+            colorbars_x_reference_dict = dict()
+
+        color_y_frame = None
+        if colorbars_y is not None:
+            unique_values = adata.obs[colorbars_y].apply(pd.unique)
+            sorted_unique_values = sorted(pd.Series(np.concatenate(unique_values.values)).fillna('NA').unique().tolist())
+            color_dict = {key: col for key, col in zip(sorted_unique_values, cycle(color_palette))}
+            colorbars_y_reference_dict = {
+                x: {y: color_dict[y] for y in unique_values[x]} for x in colorbars_y
+            }
+            color_y_frame = pd.DataFrame(
+                {
+                    x: adata.obs[x].map(colorbars_y_reference_dict[x])
+                    for x in colorbars_y
+                }
+            )
+        else:
+            colorbars_y_reference_dict = dict()
+
+        # combine colorbar reference dictionaries
+        colorbars_reference_dict = (
+            colorbars_x_reference_dict | colorbars_y_reference_dict
+        )
+
+        # set colorbar scale
+        cmap = "vlag"
+
+        # if each row/column of the heatmap should have readable labels,
+        # we must set the size such that the fontsize is accomodated.
+
+        # set sensible default heatmap dimensions
+        heatmap_height = 5
+        heatmap_width = 5
+
+        # convert fontsize to inches for matplotlib
+        fontsize_inches = fontsize_medium / 72
+        if annotated_rows:
+            row_height = fontsize_inches * 2
+            heatmap_height = adata.X.shape[0] * row_height
+        else:
+            row_height = heatmap_height / adata.X.shape[0]
+
+        if annotated_cols:
+            col_width = fontsize_inches * 2
+            heatmap_width = adata.X.shape[1] * col_width
+        else:
+            col_width = heatmap_width / adata.X.shape[1]
+
+        # ensure that the heatmap is not too large
+        if heatmap_height > 20:
+            print(
+                "Heatmap height exceeds 20 inches. This is likely to cause issues with rendering."
+            )
+        if heatmap_width > 20:
+            print(
+                "Heatmap width exceeds 20 inches. This is likely to cause issues with rendering."
+            )
+
+        # set sensible margins for annotations (dendrogram, legend, names)
+        plot_height = heatmap_height + 1.5  # legend
+        plot_width = heatmap_width
+
+        if cluster_across_y:
+            plot_height += 1
+            if show_xlabels:
+                plot_height += 1
+        if cluster_across_x:
+            plot_width += 1
+            if show_ylabels:
+                plot_width += 1
+
+        # get dataframe from anndata object
+        adata_data = pd.DataFrame(
+            data=adata.X, index=adata.obs_names, columns=adata.var_names
+        )
+
+        # plot sns clustermap
+        hm = sns.clustermap(
+            data=adata_data,
+            cmap=cmap,
+            row_colors=color_y_frame if colorbars_y is not None else None,
+            col_colors=color_x_frame if colorbars_x is not None else None,
+            row_linkage=y_linkage if cluster_across_y else None,
+            col_linkage=x_linkage if cluster_across_x else None,
+            figsize=(plot_width, plot_height),
+            vmin=vmin,
+            vmax=vmax,
+            dendrogram_ratio=0.1,
+            # by default, if we want to see labels we want all of them
+            yticklabels=1,
+            xticklabels=1,
+        )
+
+        # parse heatmap tick labels and set tick label size and tick line width
+        yaxis_hm_labels_parsed = [
+            Utils.parse_label(L.get_text(), label_parse_dict, label_parse_regex)
+            for L in hm.ax_heatmap.get_yticklabels()
+        ]
+        hm.ax_heatmap.set_yticklabels(yaxis_hm_labels_parsed)
+
+        xaxis_hm_labels_parsed = [
+            Utils.parse_label(L.get_text(), label_parse_dict, label_parse_regex)
+            for L in hm.ax_heatmap.get_xticklabels()
+        ]
+        hm.ax_heatmap.set_xticklabels(xaxis_hm_labels_parsed)
+        hm.ax_heatmap.tick_params(
+            labelsize=fontsize_medium, width=linewidth_medium
+        )
+
+        # set tick label size and tick line width for heatmap
+        hm.ax_heatmap.tick_params(axis="x", labelsize=fontsize_medium)
+        hm.ax_heatmap.tick_params(axis="y", labelsize=fontsize_medium)
+
+        # hide labels if not needed
+        if not show_xlabels:
+            hm.ax_heatmap.set_xticks([])
+            hm.ax_heatmap.set_xlabel("")
+        if not show_ylabels:
+            hm.ax_heatmap.set_yticks([])
+            hm.ax_heatmap.set_ylabel("")
+
+        # set heatmap position fixed, all other plot elements are positioned relative to this!
+        heatmap_position = [0.1, 0.1, 0.8, 0.8]
+        hm.ax_heatmap.set_position(heatmap_position)
+
+        # get the width of one column of the heatmap in figure units
+        heatmap_bottom = hm.ax_heatmap.get_position().y0
+        heatmap_left = hm.ax_heatmap.get_position().x0
+        heatmap_width = hm.ax_heatmap.get_position().width
+        heatmap_height = hm.ax_heatmap.get_position().height
+
+        # set colorbar columns, position off to the left
+        if color_x_frame is not None:
+            hm.ax_col_colors.tick_params(
+                axis="y", labelsize=fontsize_medium, width=linewidth_medium
+            )
+            yaxis_bar_labels_parsed = [
+                Utils.parse_label(L.get_text(), label_parse_dict, label_parse_regex)
+                for L in hm.ax_col_colors.get_yticklabels()
+            ]
+            hm.ax_col_colors.set_yticklabels(yaxis_bar_labels_parsed)
+            hm.ax_col_colors.spines[["right", "top", "bottom", "left"]].set_visible(
+                True
+            )
+            hm.ax_col_colors.set_position(
+                [
+                    heatmap_left,
+                    (heatmap_bottom + heatmap_height + (row_height / 10)),
+                    heatmap_width,
+                    hm.ax_col_colors.get_position().height,
+                ]
+            )
+            color_x_top = hm.ax_col_colors.get_position().y1
+        else:
+            color_x_top = heatmap_bottom + heatmap_height
+
+        # set colorbar rows, position off to the top
+        if color_y_frame is not None:
+            hm.ax_row_colors.xaxis.set_ticks_position("top")
+            xaxis_bar_labels_parsed = [
+                Utils.parse_label(L.get_text(), label_parse_dict, label_parse_regex)
+                for L in hm.ax_row_colors.get_xticklabels()
+            ]
+            hm.ax_row_colors.set_xticklabels(xaxis_bar_labels_parsed)
+            hm.ax_row_colors.tick_params(
+                axis="x",
+                rotation=90,
+                labelsize=fontsize_medium,
+                width=linewidth_medium,
+            )
+            hm.ax_row_colors.spines[["right", "top", "bottom", "left"]].set_visible(
+                True
+            )
+            hm.ax_row_colors.set_position(
+                [
+                    (heatmap_left - hm.ax_row_colors.get_position().width)
+                    - (col_width / 10),
+                    heatmap_bottom,
+                    hm.ax_row_colors.get_position().width,
+                    heatmap_height,
+                ]
+            )
+            color_y_left = hm.ax_row_colors.get_position().x0
+        else:
+            color_y_left = heatmap_left
+
+        # position dendrograms
+        if show_dendrogram_y:
+            hm.ax_row_dendrogram.set_position(
+                [
+                    color_y_left - 0.1,
+                    heatmap_bottom,
+                    0.1,
+                    heatmap_height,
+                ]
+            )
+            dendrogram_y_left = hm.ax_row_dendrogram.get_position().x0
+        else:
+            dendrogram_y_left = heatmap_left
+
+        if show_dendrogram_x:
+            hm.ax_col_dendrogram.set_position(
+                [
+                    heatmap_left,
+                    color_x_top,
+                    heatmap_width,
+                    0.1,
+                ]
+            )
+
+        # hide dendrograms if not needed
+        hm.ax_row_dendrogram.set_visible(show_dendrogram_y)
+        hm.ax_col_dendrogram.set_visible(show_dendrogram_x)
+
+        # set colorbar position on the left side of the heatmap
+        hm.cax.set_position(
+            [(dendrogram_y_left - 0.075), heatmap_bottom, (0.025), heatmap_height]
+        )
+        hm.cax.yaxis.set_ticks_position("left")
+
+        # set colorbar tick label size and tick line width
+        hm.ax_cbar.tick_params(
+            labelsize=fontsize_medium, width=linewidth_medium
+        )
+
+        # add Patch legend for colorbars: requires dictionary of values
+        if len(colorbars_reference_dict) > 0:
+            # iterate over colorbars and make all legends, then place them with appropriate spacing
+            legend_widths = []
+            legend_heights = []
+            for k, v in colorbars_reference_dict.items():
+                # extract patches and labels from color dictionary
+                _hs, _ls, _lt = Utils.multilegend_patch_generator(
+                    {k: v}, single_column=False
+                )
+                ls_p = [
+                    Utils.parse_label(L, label_parse_dict, label_parse_regex)
+                    for L in _ls
+                ]
+                lt_p = Utils.parse_label(_lt, label_parse_dict, label_parse_regex)
+                hml = hm.figure.legend(
+                    _hs,
+                    ls_p,
+                    frameon=False,
+                    bbox_to_anchor=(0, 0),
+                    loc="upper left",
+                    bbox_transform=hm.figure.transFigure,
+                    prop={"size": fontsize_medium},
+                    title=lt_p,
+                    title_fontsize=fontsize_medium,
+                )
+
+                # get width and height of legend
+                legend_widths.append(hml.get_window_extent().width)
+                legend_heights.append(hml.get_window_extent().height)
+
+                # remove legend again
+                hml.remove()
+
+            # get maximum height of all legends
+            max_legend_height_relative = (max(legend_heights) / 350) / heatmap_height
+
+            # iterate over colorbars and plot and individual legend for each one
+            for i, ((k, v), lh, lw) in enumerate(
+                zip(colorbars_reference_dict.items(), legend_heights, legend_widths)
+            ):
+                # extract patches and labels from color dictionary
+                hs, ls, legend_title = Utils.multilegend_patch_generator(
+                    {k: v}, pad_max_length=False, single_column=False
+                )
+
+                # parse all strings
+                ls_parsed = [
+                    Utils.parse_label(L, label_parse_dict, label_parse_regex)
+                    for L in ls
+                ]
+                legend_title_parsed = Utils.parse_label(
+                    legend_title, label_parse_dict, label_parse_regex
+                )
+
+                # position the first legend and subsequently add the others below
+                lh_relative = (lh / 300) / heatmap_height
+                lw_relative = (lw / 250) / heatmap_width
+
+                # decide legend positions
+                if legends_position == "right":
+                    legend_alignment = "lower left"
+                    legend_x = (heatmap_left + heatmap_width) + legend_right_offset
+                    if i == 0:
+                        legend_y = (
+                            heatmap_bottom + heatmap_height
+                        ) - legend_right_headspace
+                    else:
+                        spacing_y = lh_relative + legend_right_lineheight
+                        legend_y = legend_y - spacing_y
+
+                elif legends_position == "top":
+                    legend_alignment = "upper left"
+                    legend_x = heatmap_left if i == 0 else legend_x + lw_relative
+                    legend_y = (
+                        (heatmap_bottom + heatmap_height)
+                        + max_legend_height_relative
+                        + 0.1
+                    )
+
+                # plot legend
+                hml = hm.figure.legend(
+                    hs,
+                    ls_parsed,
+                    frameon=False,
+                    bbox_to_anchor=(legend_x, legend_y),
+                    loc=legend_alignment,
+                    bbox_transform=hm.figure.transFigure,
+                    prop={"size": fontsize_medium},
+                    title=legend_title_parsed,
+                    title_fontsize=fontsize_medium,
+                )
+
+        # enumerate plot
+        if enumerate_plot is not None:
+            _parsed_enumeration = Utils.parse_label(
+                enumerate_plot, label_parse_dict, label_parse_regex
+            )
+            hm.ax_heatmap.text(
+                enumerate_xy[0],
+                enumerate_xy[1],
+                _parsed_enumeration,
+                horizontalalignment="left",
+                verticalalignment="center",
+                transform=hm.ax_heatmap.transAxes,
+                fontsize=fontsize_medium,
+                color="black",
+                fontweight="bold",
+            )
+
+        # add title if necesseary
+        if title is not None:
+            title_parsed = Utils.parse_label(title, label_parse_dict, label_parse_regex)
+            plt.suptitle(title_parsed, fontsize=fontsize_medium)
+
+        # return heatmap object and dendrogram linkages
+        if not cluster_across_y:
+            x_linkage = None
+        if not cluster_across_x:
+            y_linkage = None
+
+        return hm, x_linkage, y_linkage
         
     @staticmethod
     def save_figure(
