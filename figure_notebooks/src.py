@@ -720,6 +720,153 @@ class Utils():
         return output_df
 
     @staticmethod
+    def nan_safe_ttest_ind(  # implicitly tested via unit-test group_ratios_ttest_ind
+        a: pd.Series,
+        b: pd.Series,
+        **kwargs,
+    ):
+        if not isinstance(a, pd.Series) or not isinstance(b, pd.Series):
+            warnings.warn(
+                " --> nan_safe_ttest_ind warning: Input must be a pandas Series. Converting to series...",
+                stacklevel=2,
+            )
+            a = pd.Series(a)
+            b = pd.Series(b)
+
+        if a.count() < 2 or b.count() < 2:
+            return (np.nan, np.nan)
+        else:
+            return ttest_ind(a, b, **kwargs)
+
+    @staticmethod
+    def group_ratios_ttest_ind(
+        data: pd.DataFrame,
+        metadata: pd.DataFrame,
+        between: str,
+        equal_var: bool = False,
+    ):
+        """Calculate (log2) ratios of features between metadata groups.
+
+        Calculate ratios and log2 ratios of each feature in the input data
+        between groups in the metadata 'between' column.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Dataframe with features as columns and samples as rows.
+        metadata : pd.DataFrame
+            Dataframe with samples as rows and metadata as columns.
+        between : str
+            Name of the column in metadata that contains the groups
+            to compare.
+        equal_var : bool
+            Whether to assume equal variance in the t-test.
+
+        Returns
+        -------
+        pd.DataFrame
+            Dataframe with ratios and log2 ratios, as well as p-values
+            of each feature between the groups in the 'between' column.
+
+        """
+        # check that all columns of data are numeric
+        if not all(np.issubdtype(data[col].dtype, np.number) for col in data.columns):
+            logging.warning(
+                "Error in group_ratios_ttest_ind: All columns of data must be numeric."
+            )
+            return None
+
+        # check input groups
+        levels = metadata[between].unique()
+        # logging.info(f" |-> Levels of 'between' variable: {levels}")
+
+        # ratios require at least two unique groups
+        if len(levels) < 2:
+            logging.warning(
+                "Error in group_ratios_ttest_ind: 'between' variable must have at least two levels."
+            )
+            return None
+
+        # each group must have at least two non-na samples
+        if any(metadata[between].value_counts() < 2):
+            logging.warning(
+                "Error in group_ratios_ttest_ind: Each group in 'between' variable must have at least two samples."
+            )
+            return None
+
+        # generate all possible ratio pairs and inverses between groups
+        _out = []
+        for i in range(len(levels)):
+            for j in range(i + 1, len(levels)):
+                g1 = levels[i]
+                g2 = levels[j]
+
+                g1_frame = data[metadata[between] == g1]
+                g2_frame = data[metadata[between] == g2]
+
+                comparison = f"{g1}_over_{g2}"
+                inverted_comparison = f"{g2}_over_{g1}"
+                features = pd.Series(data.columns)
+
+                # record number of non-na samples in each group
+                g1_n_samples = g1_frame.count()
+                g2_n_samples = g2_frame.count()
+
+                # calculate ratio and difference, latter for log-transformed inputs
+                g1_mean = g1_frame.mean(axis=0)
+                g2_mean = g2_frame.mean(axis=0)
+
+                # where mean is zero, insert np.nan to avoid division by zero
+                g1_mean[g1_mean == 0] = np.nan
+                g2_mean[g2_mean == 0] = np.nan
+
+                # calculate ratios and deltas
+                ratio = g1_mean / g2_mean
+                delta = g1_mean - g2_mean
+
+                # apply wrapped ttest_ind that returns nan if either group
+                # has fewer than two non-na samples
+                t, p = zip(
+                    *features.apply(
+                        lambda x,
+                        _g1_frame=g1_frame,
+                        _g2_frame=g2_frame: Utils.nan_safe_ttest_ind(
+                            a=_g1_frame[x],
+                            b=_g2_frame[x],
+                            equal_var=equal_var,
+                            nan_policy="omit",
+                        )
+                    )
+                )
+
+                # adjust pvalues using Benjamini-Hochberg method, accounting for nans
+                p_adj = Utils.nan_safe_bh_correction(p)
+
+                # store results in dataframe
+                _out_df = pd.DataFrame(
+                    {
+                        "id": features.values,
+                        f"ratio_{comparison}": ratio,
+                        f"delta_{comparison}": delta,
+                        f"tvalue_{comparison}": t,
+                        f"pvalue_{comparison}": p,
+                        f"padj_{comparison}": p_adj,
+                        f"ratio_{inverted_comparison}": 1 / ratio,
+                        f"delta_{inverted_comparison}": -delta,
+                        f"tvalue_{inverted_comparison}": [-tj for tj in t],
+                        f"pvalue_{inverted_comparison}": p,
+                        f"padj_{inverted_comparison}": p_adj,
+                        f"n_{g1}": g1_n_samples,
+                        f"n_{g2}": g2_n_samples,
+                    }
+                ).set_index("id", drop=True)
+                _out_df.index.name = None
+
+                _out.append(_out_df)
+
+        return pd.concat(_out, axis=1)
+
+    @staticmethod
     def boxplot(
         data: pd.DataFrame,
         value_col: str,
