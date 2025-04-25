@@ -772,6 +772,15 @@ class Utils():
 
         """
 
+        plt.rcParams.update(
+            {
+                "svg.fonttype": "none",
+                "font.family": "Arial",
+                "pdf.fonttype": 42,
+                "ps.fonttype": 42,
+            }
+        )
+
         highlight_points = [] if highlight_points is None else highlight_points
         scatter_kwargs = {"s": 15} if scatter_kwargs is None else scatter_kwargs
         xtick_kwargs = {} if xtick_kwargs is None else xtick_kwargs
@@ -1125,6 +1134,15 @@ class Utils():
             fontsize_medium: int = 8,
         ):
             """Scatterplot functionality based on dataframe input"""
+
+            plt.rcParams.update(
+                {
+                    "svg.fonttype": "none",
+                    "font.family": "Arial",
+                    "pdf.fonttype": 42,
+                    "ps.fonttype": 42,
+                }
+            )
 
             highlight_points = [] if highlight_points is None else highlight_points
             scatter_kwargs = {"s": 5} if scatter_kwargs is None else scatter_kwargs
@@ -1530,12 +1548,13 @@ class Utils():
 
         """
 
-        # make pdf fonts editable in illustrator
+        # make fonts editable in illustrator
         plt.rcParams.update(
             {
+                "svg.fonttype": "none",
+                "font.family": "Arial",
                 "pdf.fonttype": 42,
                 "ps.fonttype": 42,
-                "font.family": "Arial",
             }
         )
 
