@@ -1533,11 +1533,9 @@ class Utils():
         # make pdf fonts editable in illustrator
         plt.rcParams.update(
             {
-                "svg.fonttype" : "none",
                 "pdf.fonttype": 42,
                 "ps.fonttype": 42,
                 "font.family": "Arial",
-                "font.size": fontsize_medium,
             }
         )
 
