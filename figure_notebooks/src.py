@@ -78,6 +78,7 @@ class Utils():
             uniprot_candidates = fields[1:]
             for uid in uniprot_candidates:
                 if uid:
+                    uid = uid.split("-")[0]
                     mappings[ensembl_id] = uid
                     break
 
@@ -88,6 +89,35 @@ class Utils():
                     mappings[e] = e
 
         return mappings
+    
+    @staticmethod
+    def map_pg_to_id(
+        pg_series: pd.Series,
+        id_series: pd.Series,
+    ):
+        # first, check that each PG maps to a single ID, i.e. no PG maps to multiple IDs
+        pgs = pg_series.dropna().values
+        ids = id_series.dropna().values
+
+        # ineffient nested loops but works for now
+        found_status = []
+        for t in ids:
+            found_counter = 0
+            for p in pgs:
+                if t in p.split(";"):
+                    found_counter += 1
+            found_status.append(found_counter)
+
+        if max(found_status) > 1:
+            raise ValueError("PGs map to multiple IDs, cannot proceed with mapping.")
+
+        id_to_group = {}
+        for group in pgs:
+            for id in ids:
+                if id in group.split(";"):
+                    id_to_group[id] = group
+
+        return id_to_group
     
     @staticmethod
     def deduplicate_alphanumeric_dataframe(
@@ -1499,6 +1529,17 @@ class Utils():
         Example:
 
         """
+
+        # make pdf fonts editable in illustrator
+        plt.rcParams.update(
+            {
+                "svg.fonttype" : "none",
+                "pdf.fonttype": 42,
+                "ps.fonttype": 42,
+                "font.family": "Arial",
+                "font.size": fontsize_medium,
+            }
+        )
 
         # create AnnData object
         adata = ad.AnnData(X=data)
