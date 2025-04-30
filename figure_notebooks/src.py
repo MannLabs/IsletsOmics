@@ -25,7 +25,7 @@ class Utils():
 
     @staticmethod
     def map_ensembl_to_uniprot(
-        organism: str = "hsapiens",
+        organism: str = "mmusculus",
         coalesce: bool = True,
     ):
         """Get Ensembl to Uniprot mapping for a given organism.
