@@ -119,6 +119,28 @@ class Utils():
 
         return id_to_group
     
+    def add_human_uniprot_ids_to_mouse2human(
+    mouse2human: pd.DataFrame,
+    hsapiens_ref_dict: dict,
+    ):
+        # Get mouse2human['human_UniProtID'] by mapping mouse2human['Human gene stable ID'] to human_ensembl2uniprot
+        mouse2human['human_UniProtID'] = mouse2human['Human gene stable ID'].map(hsapiens_ref_dict)
+        return mouse2human
+
+    def add_human_uniprot_ids_to_feature_metadata(
+        mouse2human: pd.DataFrame,
+        feature_metadata: pd.DataFrame,
+    ):
+        
+        # Select the first matching ortholog
+        m2h_unique = mouse2human[['Gene name', 'human_UniProtID']].drop_duplicates(subset = ['Gene name'])
+
+        # Add ortholog IDs into existing feature metadata
+        feature_metadata = feature_metadata.merge(m2h_unique, left_on = 'PG.Genes', right_on = 'Gene name', how = 'left')
+        feature_metadata.set_index('PTM_collapse_key', inplace = True, drop = False)
+
+        return feature_metadata
+    
     @staticmethod
     def deduplicate_alphanumeric_dataframe(
         df: pd.DataFrame, aggregation_method: str = "mean", axis: int = 0
