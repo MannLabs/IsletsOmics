@@ -178,6 +178,7 @@ revision_questions/
 revision_results/
 41587_2019_344_MOESM5_ESM.xlsx
 F08.ipynb
+mouse2human_ortholog_mapping.txt
 
 figure_notebooks/.DS_Store
 .DS_Store
