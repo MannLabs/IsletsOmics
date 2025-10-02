@@ -26,6 +26,9 @@ dependencies:
   - regex>=2024.0.0
   - adjusttext>=1.2.0
 
+  # File I/O
+  - openpyxl>=3.1.0
+
   # Jupyter
   - jupyter>=1.1.0
   - ipykernel>=6.29.0
